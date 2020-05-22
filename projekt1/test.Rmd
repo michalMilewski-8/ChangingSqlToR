@@ -1,0 +1,151 @@
+---
+title: "Projekt_1_Sprawozdanie"
+author: "Michał Milewski"
+date: "4/24/2020"
+output: html_document
+---
+
+```{r setup, include=TRUE , cache=TRUE}
+library(sqldf)
+library(dplyr)
+library(microbenchmark)
+library(data.table)
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+Badges <- read.csv("./travel_stackexchange_com/Badges.csv")
+Tags <-  read.csv("./travel_stackexchange_com/Tags.csv")
+Comments <-  read.csv("./travel_stackexchange_com/Comments.csv")
+PostLinks <-  read.csv("./travel_stackexchange_com/PostLinks.csv")
+Posts <-  read.csv("./travel_stackexchange_com/Posts.csv")
+Users <-  read.csv("./travel_stackexchange_com/Users.csv")
+Votes<-  read.csv("./travel_stackexchange_com/Votes.csv")
+badges = data.table(Badges)
+users = data.table(Users)
+votes <- as.data.table(Votes)
+posts <- as.data.table(Posts)
+comments <- data.table(Comments)
+```
+
+## Rozwiązania przykładów
+### Przykład 1
+```sql
+SELECT Posts.Title, UpVotesPerYear.Year, MAX(UpVotesPerYear.Count) AS Count 
+       FROM(
+            SELECT
+                PostId,
+                COUNT(*) AS Count,
+                STRFTIME('%Y',Votes.CreationDate) AS Year
+            FROM Votes
+            WHERE VoteTypeId=2
+            GROUP BY PostId, Year
+       ) AS UpVotesPerYear
+      JOIN Posts ON Posts.Id=UpVotesPerYear.PostId
+      WHERE Posts.PostTypeId=1
+      GROUP BY Year
+```
++ Słowna interpretacja zapytania
+    Wybrać z tabeli Posts te Pytania, które w danym roku(dla każdego z pojawiających się lat) uzyskały najwyższą ilość pozytywnych głosów 
++ Wyniki polecenia microbenchmark
+    ``` {r , echo = TRUE, cache=TRUE, dependson='setup'}
+    microbenchmark::microbenchmark(sqldf = {df <- sqldf("SELECT Posts.Title, UpVotesPerYear.Year, MAX(UpVotesPerYear.Count) AS Count 
+       FROM(
+            SELECT
+                PostId,
+                COUNT(*) AS Count,
+                STRFTIME('%Y',Votes.CreationDate) AS Year
+            FROM Votes
+            WHERE VoteTypeId=2
+            GROUP BY PostId, Year
+       ) AS UpVotesPerYear
+      JOIN Posts ON Posts.Id=UpVotesPerYear.PostId
+      WHERE Posts.PostTypeId=1
+      GROUP BY Year
+      ")},
+                               base = {VotesWithYears <- data.frame(Votes,lapply(Votes["CreationDate"],FUN = function(x) strftime(x,"%Y")),stringsAsFactors = FALSE)
+                               colnames(VotesWithYears) <- c(colnames(Votes),"Year")
+                               UpVotesPerYear <- as.data.frame(table(VotesWithYears[VotesWithYears$VoteTypeId == 2,c("PostId","Year") ]),stringsAsFactors = FALSE)
+                               colnames(UpVotesPerYear) <- c("PostId","Year", "Count")
+                               x <- merge(UpVotesPerYear,Posts,by.x = "PostId",by.y = "Id",all.x = TRUE, all.y = FALSE)
+                               x2 <- x[x$PostTypeId==1, c("Title", "Year", "Count")]
+                               db <- do.call(rbind, lapply(split(x2,as.factor(x2$Year)), function(x) {return(x[which.max(x$Count),])}))
+                               db <- data.frame(db, stringsAsFactors = FALSE)},
+                               dplyr = {UpVotesPerYear <- (Votes %>%
+                                                             mutate(Year = format(as.Date(CreationDate),"%Y")) %>%
+                                                             group_by(PostId,Year) %>%
+                                                             filter(VoteTypeId == 2) %>%
+                                                             select(PostId, Year) %>%
+                                                             count(name="Count"))
+                               
+                               dp <- right_join(Posts,UpVotesPerYear, by= c("Id" = "PostId"))%>%
+                                 filter(PostTypeId == 1) %>%
+                                 select(Title ,Year ,Count) %>%
+                                 group_by(Year) %>%
+                                 filter (Count == max(Count))
+                               },
+                               data.table = {
+                               UpVotesPerYear <- votes[VoteTypeId == 2,Year:=strftime(CreationDate,"%Y")]
+                               UpVotesPerYear <- votes[,.(Count = .N),by= .(PostId,Year)]
+                               
+                               dt <- merge.data.table(UpVotesPerYear,posts,by.x="PostId", by.y = "Id")
+                               dt<- dt[PostTypeId == 1 & !is.na(Year),.SD[which.max(Count)],by= Year][,.(Title,Year, Count)]},times = 3L)
+    ```
+ + Rozwiązanie referencyjne
+    ```{r, echo = FALSE, cache=TRUE, dependson='setup'}
+     df <- sqldf("SELECT Posts.Title, UpVotesPerYear.Year, MAX(UpVotesPerYear.Count) AS Count 
+       FROM(
+            SELECT
+                PostId,
+                COUNT(*) AS Count,
+                STRFTIME('%Y',Votes.CreationDate) AS Year
+            FROM Votes
+            WHERE VoteTypeId=2
+            GROUP BY PostId, Year
+       ) AS UpVotesPerYear
+      JOIN Posts ON Posts.Id=UpVotesPerYear.PostId
+      WHERE Posts.PostTypeId=1
+      GROUP BY Year
+      ")
+    ```
+ + Rozwiązanie za pomocą funkcji bazowych 
+    ```{r, echo = FALSE, cache=TRUE, dependson='setup'}
+    VotesWithYears <- data.frame(Votes,lapply(Votes["CreationDate"],FUN = function(x) strftime(x,"%Y")),stringsAsFactors = FALSE)
+    colnames(VotesWithYears) <- c(colnames(Votes),"Year")
+    UpVotesPerYear <- as.data.frame(table(VotesWithYears[VotesWithYears$VoteTypeId == 2,c("PostId","Year") ]),stringsAsFactors = FALSE)
+    colnames(UpVotesPerYear) <- c("PostId","Year", "Count")
+    x <- merge(UpVotesPerYear,Posts,by.x = "PostId",by.y = "Id",all.x = TRUE, all.y = FALSE)
+    x2 <- x[x$PostTypeId==1, c("Title", "Year", "Count")]
+    db <- do.call(rbind, lapply(split(x2,as.factor(x2$Year)), function(x) {return(x[which.max(x$Count),])}))
+    db <- data.frame(db, stringsAsFactors = FALSE)
+    ```
+ + Rozwiązanie z uzyciem biblioteki ***dplyr***
+    ```{r, echo = FALSE, cache=TRUE, dependson='setup'}
+    UpVotesPerYear <- (Votes %>%
+      mutate(Year = format(as.Date(CreationDate),"%Y")) %>%
+      group_by(PostId,Year) %>%
+      filter(VoteTypeId == 2) %>%
+      select(PostId, Year) %>%
+      count(name="Count"))
+      
+    dp <- right_join(Posts,UpVotesPerYear, by= c("Id" = "PostId"))%>%
+      filter(PostTypeId == 1) %>%
+      select(Title ,Year ,Count) %>%
+      group_by(Year) %>%
+      filter (Count == max(Count))
+    
+    ```
+ + Rozwiązanie z użyciem biblioteki ***data.table***
+    ```{r, echo = FALSE, cache=TRUE, dependson='setup'}
+    UpVotesPerYear <- votes[VoteTypeId == 2,Year:=strftime(CreationDate,"%Y")]
+    UpVotesPerYear <- votes[,.(Count = .N),by= .(PostId,Year)]
+    
+    dt <- merge.data.table(UpVotesPerYear,posts,by.x="PostId", by.y = "Id")
+    dt<- dt[PostTypeId == 1 & !is.na(Year),.SD[which.max(Count)],by= Year][,.(Title,Year, Count)]
+    all_equal(df,dt)
+    ```
+  + Sprawdzenie poprawności rozwiązań
+    ```{r, echo = TRUE, cache=TRUE}
+    all_equal(df,db)
+    all_equal(df,dp)
+    all_equal(df,dt)
+    ```
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
